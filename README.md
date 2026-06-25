@@ -3,7 +3,7 @@
 Open-source Hermes/Codex skill for setting up a colleague-owned Telegram bot team:
 
 - one master bot that listens to `/task`
-- two worker bots for developer and QA reviewer roles
+- two worker bots for developer and QA roles
 - one local `group_hermes_swarm.py` controller on the colleague's machine
 
 This pattern lets every operator run their own mini development team in their own Telegram group without sharing SSH access, relay access, or bot tokens with an external coordinator.

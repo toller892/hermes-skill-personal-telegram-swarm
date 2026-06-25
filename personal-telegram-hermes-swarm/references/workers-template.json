@@ -8,7 +8,7 @@
     "task_transport": "file"
   },
   {
-    "agent_name": "QA Reviewer",
+    "agent_name": "QA",
     "token_env": "WORKER_QA_BOT_TOKEN",
     "hermes_bin": "hermes",
     "role": "测试评审型 worker。负责验证、复现、运行测试、检查交付物、整理验收结论、风险和最终汇总。需要明确标注已验证项、未验证项和可复现步骤。",

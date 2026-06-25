@@ -8,7 +8,7 @@ Use `@BotFather` to create:
 
 - `<name>_hermes_master_bot`
 - `<name>_developer_bot`
-- `<name>_qa_reviewer_bot`
+- `<name>_qa_bot`
 
 Put every token in a private `.env` file. Do not commit it.
 
@@ -20,7 +20,9 @@ Recommended:
 
 - Use `/task@master_bot ...` for testing.
 - Do not run separate Hermes gateways for worker bots in the group.
-- If worker gateways are running for private chat, set `TELEGRAM_REQUIRE_MENTION=true`.
+- If a worker bot already has an independent Hermes gateway, stop it before using this group swarm.
+- Only the master bot should call Telegram `getUpdates`.
+- Worker bot tokens are used only by `group_hermes_swarm.py` to call `sendMessage`, so worker bots can appear as separate speakers in the group.
 
 ## 3. Prepare Local Files
 
@@ -40,7 +42,7 @@ Create `.env`:
 cat > .env <<'EOF'
 ORCHESTRATOR_BOT_TOKEN=<master_bot_token>
 WORKER_DEVELOPER_BOT_TOKEN=<developer_bot_token>
-WORKER_QA_BOT_TOKEN=<qa_reviewer_bot_token>
+WORKER_QA_BOT_TOKEN=<qa_bot_token>
 EOF
 chmod 600 .env
 ```
@@ -133,7 +135,7 @@ kill <old_pid>
 
 Meaning: a worker's independent Telegram gateway is also listening in the group.
 
-Fix: stop that worker gateway for group mode, or set it to require mentions. The master script should be the only `/task` owner.
+Fix: stop that worker gateway for group mode. The master/controller should be the only `/task` owner.
 
 ### Planner Falls Back
 

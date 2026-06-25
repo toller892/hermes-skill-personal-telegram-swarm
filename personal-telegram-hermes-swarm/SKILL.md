@@ -1,6 +1,6 @@
 ---
 name: personal-telegram-hermes-swarm
-description: Set up and operate a compact personal Hermes Telegram swarm with one master bot and two role worker bots in a private group or channel. Use when configuring a self-contained three-bot team, creating BotFather bots, wiring developer and QA reviewer workers, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each operator can independently dispatch /task work from their own Hermes environment.
+description: Set up and operate a compact personal Hermes Telegram swarm with one master bot and two role worker bots in a private group or channel. Use when configuring a self-contained three-bot team, creating BotFather bots, wiring developer and QA workers, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each operator can independently dispatch /task work from their own Hermes environment.
 ---
 
 # Personal Telegram Hermes Swarm
@@ -17,13 +17,14 @@ Colleague Telegram group/channel
 Colleague machine runs group_hermes_swarm.py
       |
       v
-Local Hermes profiles execute role TODOs
+Hermes workers/profiles execute role TODOs
       |
       v
-Worker bot identities post results back to the group
+Controller posts results with worker bot tokens
 ```
 
 The operator owns all bot tokens and all Hermes execution. No external central controller is required for this swarm.
+Only the master bot listens to Telegram updates. Worker bots do not run gateways; they are speaking identities used by the controller through Telegram `sendMessage`.
 
 ## Default Team
 
@@ -31,14 +32,14 @@ Use this default three-bot pattern unless the user asks for another shape:
 
 - Master bot: listens to `/task`, plans TODOs, assigns workers.
 - Developer bot: requirements refinement, implementation, backend/frontend/scripts, integration, and reproducible commands.
-- QA Reviewer bot: verification, tests, acceptance checks, final summary, and unverified-risk notes.
+- QA bot: verification, tests, acceptance checks, final summary, and unverified-risk notes.
 
 ## Setup Workflow
 
 1. Read `references/setup-guide.md` when doing full setup.
 2. Create one master bot and two worker bots with `@BotFather`.
 3. Add all bots to one Telegram group or channel.
-4. Disable independent worker gateways in that group. Worker bots are speaking identities controlled by the master script.
+4. Run only the master/controller process. Do not run independent worker bot gateways.
 5. Configure `workers.json` with each worker bot token and role.
 6. Run `scripts/group_hermes_swarm.py` from the colleague's machine.
 7. Test with `/task@master_bot ...`.
@@ -46,7 +47,7 @@ Use this default three-bot pattern unless the user asks for another shape:
 ## Important Rules
 
 - Only one process may call `getUpdates` for the master bot token. If Telegram returns HTTP 409, stop duplicate master processes.
-- Worker bots should not independently consume bare `/task`; the master owns `/task`.
+- Worker bot tokens are send-only identities. They should not independently consume bare `/task`; the master owns `/task`.
 - If worker Hermes profiles all run on the same machine, paths are shared. If workers run on separate machines, paths are not shared.
 - Long tasks enter project mode: the master saves the original task under `tasks/` and assigns workers a file path plus their TODOs. Use worker `"task_transport": "inline"` only when a worker cannot read the master's filesystem.
 - Never commit bot tokens, API keys, or `.env` files.
