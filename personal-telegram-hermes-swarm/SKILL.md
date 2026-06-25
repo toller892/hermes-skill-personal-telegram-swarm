@@ -1,6 +1,6 @@
 ---
 name: personal-telegram-hermes-swarm
-description: Set up and operate a personal Hermes Telegram swarm with one master bot and multiple role worker bots in a private group or channel. Use when configuring a colleague-owned bot team, creating BotFather bots, wiring worker roles such as product/developer/frontend/QA/docs, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each colleague can independently dispatch /task work without sharing machine access with Tony.
+description: Set up and operate a personal Hermes Telegram swarm with one master bot and multiple role worker bots in a private group or channel. Use when configuring a self-contained bot team, creating BotFather bots, wiring worker roles such as product/developer/frontend/QA/docs, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each operator can independently dispatch /task work from their own Hermes environment.
 ---
 
 # Personal Telegram Hermes Swarm
@@ -23,7 +23,7 @@ Local Hermes profiles execute role TODOs
 Worker bot identities post results back to the group
 ```
 
-The colleague owns all bot tokens and all Hermes execution. Tony does not need SSH, relay, or worker bot tokens for that colleague's swarm.
+The operator owns all bot tokens and all Hermes execution. No external central controller is required for this swarm.
 
 ## Default Team
 

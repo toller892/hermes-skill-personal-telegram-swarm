@@ -6,7 +6,7 @@ Open-source Hermes/Codex skill for setting up a colleague-owned Telegram bot tea
 - multiple worker bots for product, developer, frontend, QA, and docs roles
 - one local `group_hermes_swarm.py` controller on the colleague's machine
 
-This pattern lets every colleague run their own mini development team in their own Telegram group without sharing SSH access, relay access, or bot tokens with Tony.
+This pattern lets every operator run their own mini development team in their own Telegram group without sharing SSH access, relay access, or bot tokens with an external coordinator.
 
 ## Install
 
