@@ -1,0 +1,564 @@
+#!/usr/bin/env python3
+"""Minimal Telegram group swarm for local Hermes.
+
+One orchestrator bot listens for /task messages in a group. The local process
+plans a todo list with Hermes, assigns items round-robin to worker bot tokens,
+runs local `hermes -z` for each item, and posts results back as the worker bots.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+
+
+TELEGRAM_MESSAGE_LIMIT = 4096
+
+
+class TelegramError(RuntimeError):
+    pass
+
+
+class PlannerOutputError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class Bot:
+    token: str
+    username: str
+    first_name: str
+
+
+@dataclass(frozen=True)
+class Agent:
+    bot: Bot
+    agent_name: str
+    role: str
+    hermes_bin: str | None = None
+    skill: str | None = None
+    session: str | None = None
+    model: str | None = None
+    provider: str | None = None
+    toolsets: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskItem:
+    title: str
+    description: str
+    is_full_task: bool = False
+
+
+@dataclass(frozen=True)
+class Assignment:
+    agent: Agent
+    todos: list[TaskItem]
+
+
+def telegram_request(
+    token: str, method: str, payload: dict | None = None, attempts: int = 6
+) -> dict:
+    url = f"https://api.telegram.org/bot{token}/{method}"
+    data = None
+    headers = {}
+
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request_timeout = 20
+    if method == "getUpdates" and isinstance(payload, dict):
+        request_timeout = int(payload.get("timeout") or 0) + 10
+
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        request = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=request_timeout) as response:
+                body = response.read().decode("utf-8")
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise TelegramError(f"Telegram HTTP {exc.code}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            last_error = exc
+            if attempt == attempts:
+                raise TelegramError(f"Telegram request failed: {exc}") from exc
+            time.sleep(min(attempt * 2, 10))
+    else:
+        raise TelegramError(f"Telegram request failed: {last_error}")
+
+    result = json.loads(body)
+    if not result.get("ok"):
+        raise TelegramError(f"Telegram API error: {result}")
+    return result
+
+
+def get_bot(token: str) -> Bot:
+    result = telegram_request(token, "getMe")["result"]
+    return Bot(
+        token=token,
+        username=result.get("username", ""),
+        first_name=result.get("first_name", result.get("username", "bot")),
+    )
+
+
+def split_for_telegram(text: str) -> list[str]:
+    if not text:
+        return ["(empty response)"]
+
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > TELEGRAM_MESSAGE_LIMIT:
+        split_at = remaining.rfind("\n", 0, TELEGRAM_MESSAGE_LIMIT)
+        if split_at < 500:
+            split_at = TELEGRAM_MESSAGE_LIMIT
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:].lstrip()
+    chunks.append(remaining)
+    return chunks
+
+
+def send_message(
+    token: str,
+    chat_id: int | str,
+    text: str,
+    message_thread_id: int | None = None,
+) -> None:
+    for chunk in split_for_telegram(text):
+        payload = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "disable_web_page_preview": True,
+        }
+        if message_thread_id is not None:
+            payload["message_thread_id"] = message_thread_id
+        telegram_request(token, "sendMessage", payload)
+
+
+def get_updates(token: str, offset: int | None, timeout: int) -> list[dict]:
+    payload = {
+        "timeout": timeout,
+        "allowed_updates": ["message", "channel_post"],
+    }
+    if offset is not None:
+        payload["offset"] = offset
+    return telegram_request(token, "getUpdates", payload).get("result", [])
+
+
+def latest_offset(updates: list[dict]) -> int | None:
+    if not updates:
+        return None
+    return max(update["update_id"] for update in updates) + 1
+
+
+def run_hermes(args: argparse.Namespace, prompt: str, agent: Agent | None = None) -> str:
+    if args.dry_run:
+        prefix = f"dry-run Hermes output"
+        if agent:
+            prefix += f" from {agent.agent_name} (@{agent.bot.username})"
+        return f"{prefix}:\n{prompt[:800]}"
+
+    hermes_bin = agent.hermes_bin if agent and agent.hermes_bin else args.hermes_bin
+    command = [hermes_bin]
+    model = agent.model if agent and agent.model else args.model
+    provider = agent.provider if agent and agent.provider else args.provider
+    toolsets = agent.toolsets if agent and agent.toolsets else args.toolsets
+
+    if model:
+        command.extend(["--model", model])
+    if provider:
+        command.extend(["--provider", provider])
+    if toolsets:
+        command.extend(["--toolsets", toolsets])
+    if agent and agent.session:
+        command.extend(["--continue", agent.session])
+    command.extend(["-z", prompt])
+
+    completed = subprocess.run(
+        command,
+        cwd=args.cwd,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=args.hermes_timeout,
+        check=False,
+    )
+    stdout = completed.stdout.strip()
+    stderr = completed.stderr.strip()
+    if completed.returncode != 0:
+        detail = stderr or stdout or f"exit code {completed.returncode}"
+        raise RuntimeError(f"Hermes failed: {detail}")
+    return stdout or stderr or "(Hermes returned no text)"
+
+
+def strip_task_command(text: str, orchestrator_username: str) -> str | None:
+    pattern = rf"^/(task|assign|todo)(@{re.escape(orchestrator_username)})?\s*(.*)$"
+    match = re.match(pattern, text.strip(), flags=re.IGNORECASE | re.DOTALL)
+    if not match:
+        return None
+    task = match.group(3).strip()
+    leading_mention = f"@{orchestrator_username}"
+    if task.lower().startswith(leading_mention.lower()):
+        task = task[len(leading_mention) :].lstrip(" \t\r\n:：,，")
+    return task
+
+
+def parse_tasks(raw: str, max_tasks: int) -> list[TaskItem]:
+    json_text = raw.strip()
+    if "```" in json_text:
+        fenced = re.search(r"```(?:json)?\s*(.*?)```", json_text, flags=re.DOTALL)
+        if fenced:
+            json_text = fenced.group(1).strip()
+    if not json_text.startswith("["):
+        start = json_text.find("[")
+        end = json_text.rfind("]")
+        if start >= 0 and end > start:
+            json_text = json_text[start : end + 1]
+
+    try:
+        data = json.loads(json_text)
+    except json.JSONDecodeError as exc:
+        raise PlannerOutputError(f"planner did not return valid JSON: {exc}") from exc
+
+    if not isinstance(data, list):
+        raise PlannerOutputError("planner JSON must be an array")
+
+    tasks = []
+    for item in data:
+        if not isinstance(item, dict):
+            raise PlannerOutputError("each planner item must be an object")
+        title = str(item.get("title") or "").strip()
+        description = str(item.get("description") or "").strip()
+        if not title or not description:
+            raise PlannerOutputError("each planner item needs title and description")
+        tasks.append(TaskItem(title=title[:80], description=description))
+
+    if not tasks:
+        raise PlannerOutputError("planner returned no tasks")
+    return tasks[:max_tasks]
+
+
+def full_task(task: str) -> TaskItem:
+    return TaskItem(title="完整任务", description=task, is_full_task=True)
+
+
+def plan_tasks(args: argparse.Namespace, task: str, worker_count: int) -> tuple[list[TaskItem], str]:
+    if worker_count <= 1:
+        return [full_task(task)], "single-worker-direct"
+
+    target_tasks = max(worker_count, worker_count * args.todos_per_worker)
+    max_tasks = max(worker_count, min(args.max_tasks, target_tasks))
+    if args.dry_run:
+        return (
+            [
+                TaskItem("需求澄清", f"确认目标、输出路径和验收标准：{task}"),
+                TaskItem("核心实现", "完成主要交付物或主要研究结论。"),
+                TaskItem("体验打磨", "检查可用性、文本说明和边界情况。"),
+                TaskItem("验收总结", "基于真实产物检查功能、路径和使用方式。"),
+            ][:max_tasks],
+            "dry-run",
+        )
+
+    prompt = (
+        "你是 Telegram 多 agent 调度器里的 planner，只能规划，禁止执行任务。"
+        "不要创建、修改、读取或删除文件；不要调用工具；不要声称任务已经完成。"
+        f"把下面的群聊任务拆成 {worker_count} 到 {max_tasks} 个可并行执行的 TODO。"
+        "只输出 JSON 数组，不要 Markdown，不要解释，不要任何前后缀文本。"
+        "每项必须是 {\"title\":\"短标题\",\"description\":\"清晰的执行说明\"}。"
+        "description 必须描述要做什么，不要写完成报告。\n\n"
+        f"任务：\n{task}"
+    )
+    try:
+        raw = run_hermes(args, prompt)
+        return parse_tasks(raw, max_tasks), "planned"
+    except Exception as exc:
+        print(f"Planner fallback to full task: {exc}", file=sys.stderr, flush=True)
+        return [full_task(task)], "planner-fallback"
+
+
+def format_todo_list(todos: list[TaskItem]) -> str:
+    lines = []
+    for index, item in enumerate(todos, start=1):
+        lines.append(f"{index}. {item.title}\n   {item.description}")
+    return "\n".join(lines)
+
+
+def execute_assignment(
+    args: argparse.Namespace, original_task: str, assignment: Assignment
+) -> str:
+    todo_list = format_todo_list(assignment.todos)
+    skill_line = ""
+    if assignment.agent.skill:
+        skill_line = f"执行前请使用 ${assignment.agent.skill} skill，并遵守该 skill 的输出格式和边界。\n"
+    prompt = (
+        f"你是一个被调度到 Telegram 群里的本地 Hermes 子 agent，名称是 {assignment.agent.agent_name}。"
+        f"你的角色设定：{assignment.agent.role}\n\n"
+        f"{skill_line}"
+        "请完成分配给你的 TODO list，并用中文给出简洁、可直接贴回群里的结果。"
+        "回复时按 TODO 编号逐项说明：完成 / 部分完成 / 阻塞，以及关键产出。"
+        "如果任务要求创建或修改文件，完成后必须基于真实文件状态报告路径和功能，不要编造未验证的特性。"
+        "如果无法完全完成，请明确说明缺口和下一步。\n\n"
+        f"总任务：\n{original_task}\n\n"
+        f"你的 TODO list：\n{todo_list}"
+    )
+    return run_hermes(args, prompt, assignment.agent)
+
+
+def build_assignments(tasks: list[TaskItem], workers: list[Agent]) -> list[Assignment]:
+    if len(tasks) == 1 and tasks[0].is_full_task:
+        worker = workers[0]
+        return [Assignment(worker, tasks)]
+
+    grouped: list[list[TaskItem]] = [[] for _ in workers]
+    for index, item in enumerate(tasks):
+        grouped[index % len(workers)].append(item)
+    return [
+        Assignment(worker, todos)
+        for worker, todos in zip(workers, grouped)
+        if todos
+    ]
+
+
+def format_assignments(assignments: list[Assignment]) -> str:
+    if len(assignments) == 1 and len(assignments[0].todos) == 1 and assignments[0].todos[0].is_full_task:
+        worker = assignments[0].agent
+        return f"收到任务，直接分配完整任务给 {worker.agent_name} (@{worker.bot.username})。"
+
+    lines = ["收到任务，已按 bot 分配 TODO list："]
+    for assignment in assignments:
+        lines.append(f"\n{assignment.agent.agent_name} (@{assignment.agent.bot.username})")
+        for index, item in enumerate(assignment.todos, start=1):
+            lines.append(f"{index}. {item.title}")
+    return "\n".join(lines)
+
+
+def handle_task(
+    args: argparse.Namespace,
+    orchestrator: Bot,
+    workers: list[Agent],
+    chat_id: int | str,
+    thread_id: int | None,
+    task_text: str,
+) -> None:
+    if not task_text:
+        send_message(
+            orchestrator.token,
+            chat_id,
+            "用法：/task 你要分配的任务\n例如：/task 帮我设计一个 10 人 agent 带练任务",
+            thread_id,
+        )
+        return
+
+    if len(workers) == 1:
+        send_message(orchestrator.token, chat_id, "收到，当前只有 1 个 worker，直接分配完整任务...", thread_id)
+    else:
+        send_message(orchestrator.token, chat_id, "收到，正在拆 TODO 并分配给 worker bot...", thread_id)
+
+    tasks, plan_mode = plan_tasks(args, task_text, len(workers))
+    if plan_mode == "planner-fallback":
+        send_message(
+            orchestrator.token,
+            chat_id,
+            "planner 没有返回合法 TODO JSON，已降级为完整任务分配，避免误拆完成报告。",
+            thread_id,
+        )
+    assignments = build_assignments(tasks, workers)
+    send_message(orchestrator.token, chat_id, format_assignments(assignments), thread_id)
+
+    for assignment in assignments:
+        worker = assignment.agent
+        assignment_title = "完整任务" if assignment.todos[0].is_full_task else f"{len(assignment.todos)} 个 TODO"
+        send_message(
+            orchestrator.token,
+            chat_id,
+            f"分配给 {worker.agent_name} (@{worker.bot.username})：{assignment_title}",
+            thread_id,
+        )
+        try:
+            result = execute_assignment(args, task_text, assignment)
+            send_message(
+                worker.bot.token,
+                chat_id,
+                f"{worker.agent_name} 完成 TODO list\n\n{result}",
+                thread_id,
+            )
+        except Exception as exc:
+            send_message(
+                orchestrator.token,
+                chat_id,
+                f"{worker.agent_name} (@{worker.bot.username}) 执行失败：{exc}",
+                thread_id,
+            )
+
+    send_message(orchestrator.token, chat_id, "本轮任务处理完成。", thread_id)
+
+
+def parse_worker_tokens() -> list[str]:
+    raw = os.environ.get("WORKER_BOT_TOKENS") or os.environ.get("WORKER_BOT_TOKEN")
+    if not raw:
+        return []
+    return [token.strip() for token in raw.split(",") if token.strip()]
+
+
+def env_or_literal(spec: dict, key: str, env_key: str | None = None) -> str | None:
+    if env_key and spec.get(env_key):
+        value = os.environ.get(str(spec[env_key]))
+        if value:
+            return value
+    value = spec.get(key)
+    if value is None:
+        return None
+    return str(value)
+
+
+def load_worker_specs(args: argparse.Namespace) -> list[dict]:
+    if args.workers_config:
+        with open(args.workers_config, "r", encoding="utf-8") as file:
+            data = json.load(file)
+        if not isinstance(data, list):
+            raise ValueError("--workers-config must be a JSON array")
+        return data
+
+    raw_specs = os.environ.get("WORKER_BOT_SPECS")
+    if raw_specs:
+        data = json.loads(raw_specs)
+        if not isinstance(data, list):
+            raise ValueError("WORKER_BOT_SPECS must be a JSON array")
+        return data
+
+    return [{"token": token} for token in parse_worker_tokens()]
+
+
+def build_workers(args: argparse.Namespace) -> list[Agent]:
+    agents: list[Agent] = []
+    for index, spec in enumerate(load_worker_specs(args), start=1):
+        token = env_or_literal(spec, "token", "token_env")
+        if not token:
+            raise ValueError(f"Worker spec #{index} is missing token or token_env")
+
+        bot = get_bot(token)
+        agent_name = str(spec.get("agent_name") or spec.get("name") or bot.first_name)
+        role = str(
+            spec.get("role")
+            or "通用执行型子 agent，负责完成被分配的具体任务并给出可交付结果。"
+        )
+        agents.append(
+            Agent(
+                bot=bot,
+                agent_name=agent_name,
+                role=role,
+                hermes_bin=env_or_literal(spec, "hermes_bin"),
+                skill=env_or_literal(spec, "skill"),
+                session=env_or_literal(spec, "session"),
+                model=env_or_literal(spec, "model"),
+                provider=env_or_literal(spec, "provider"),
+                toolsets=env_or_literal(spec, "toolsets"),
+            )
+        )
+    return agents
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Run a local Hermes-backed Telegram group swarm."
+    )
+    parser.add_argument("--hermes-bin", default="hermes")
+    parser.add_argument("--cwd", default=os.getcwd())
+    parser.add_argument("--model")
+    parser.add_argument("--provider")
+    parser.add_argument("--toolsets")
+    parser.add_argument("--poll-timeout", type=int, default=30)
+    parser.add_argument("--hermes-timeout", type=int, default=240)
+    parser.add_argument("--max-tasks", type=int, default=5)
+    parser.add_argument("--todos-per-worker", type=int, default=2)
+    parser.add_argument("--workers-config")
+    parser.add_argument("--no-drop-pending", action="store_true")
+    parser.add_argument("--dry-run", action="store_true")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    orchestrator_token = os.environ.get("ORCHESTRATOR_BOT_TOKEN") or os.environ.get(
+        "TELEGRAM_BOT_TOKEN"
+    )
+
+    if not orchestrator_token:
+        print("Missing ORCHESTRATOR_BOT_TOKEN.", file=sys.stderr)
+        return 2
+
+    try:
+        workers = build_workers(args)
+    except Exception as exc:
+        print(f"Failed to load worker specs: {exc}", file=sys.stderr)
+        return 2
+
+    orchestrator = get_bot(orchestrator_token)
+    if not workers:
+        print(
+            "Missing workers. Set WORKER_BOT_TOKEN, WORKER_BOT_TOKENS, "
+            "WORKER_BOT_SPECS, or --workers-config.",
+            file=sys.stderr,
+        )
+        return 2
+
+    print(f"Orchestrator: @{orchestrator.username}", flush=True)
+    print(
+        "Workers: "
+        + ", ".join(f"{worker.agent_name} (@{worker.bot.username})" for worker in workers),
+        flush=True,
+    )
+
+    offset = None
+    if not args.no_drop_pending:
+        pending = get_updates(orchestrator.token, offset=None, timeout=0)
+        offset = latest_offset(pending)
+        if offset is not None:
+            print(f"Dropped {len(pending)} pending update(s).", flush=True)
+
+    print("Group swarm is running. Use /task in the group. Press Ctrl+C to stop.", flush=True)
+    while True:
+        try:
+            updates = get_updates(orchestrator.token, offset=offset, timeout=args.poll_timeout)
+            for update in updates:
+                offset = update["update_id"] + 1
+                message = update.get("message") or update.get("channel_post")
+                if not message:
+                    continue
+
+                sender = message.get("from") or {}
+                if sender.get("is_bot"):
+                    continue
+
+                text = message.get("text")
+                if not text:
+                    continue
+
+                task_text = strip_task_command(text, orchestrator.username)
+                if task_text is None:
+                    continue
+
+                chat_id = message["chat"]["id"]
+                thread_id = message.get("message_thread_id")
+                print(f"Task from chat {chat_id}: {task_text[:100]}", flush=True)
+                handle_task(args, orchestrator, workers, chat_id, thread_id, task_text)
+        except KeyboardInterrupt:
+            print("\nStopped.", flush=True)
+            return 0
+        except Exception as exc:
+            print(f"Loop error: {exc}", file=sys.stderr, flush=True)
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

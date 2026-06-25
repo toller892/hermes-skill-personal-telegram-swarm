@@ -1,0 +1,12 @@
+# OS/editor noise
+.DS_Store
+*.swp
+
+# Python/cache noise
+__pycache__/
+*.pyc
+
+# Local secrets
+.env
+*.env
+secrets.*
