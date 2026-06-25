@@ -48,6 +48,7 @@ Use this default three-bot pattern unless the user asks for another shape:
 - Only one process may call `getUpdates` for the master bot token. If Telegram returns HTTP 409, stop duplicate master processes.
 - Worker bots should not independently consume bare `/task`; the master owns `/task`.
 - If worker Hermes profiles all run on the same machine, paths are shared. If workers run on separate machines, paths are not shared.
+- Long tasks enter project mode: the master saves the original task under `tasks/` and assigns workers a file path plus their TODOs. Use worker `"task_transport": "inline"` only when a worker cannot read the master's filesystem.
 - Never commit bot tokens, API keys, or `.env` files.
 - If Telegram API is blocked locally, run the master script with `HTTP_PROXY` and `HTTPS_PROXY`.
 

@@ -4,13 +4,15 @@
     "token_env": "WORKER_DEVELOPER_BOT_TOKEN",
     "hermes_bin": "hermes",
     "role": "综合开发型 worker。负责需求细化、实现、后端、前端、脚本、数据处理、集成和可复现命令。收到 TODO list 后优先完成可运行交付物，并清楚说明文件路径、部署地址或执行命令。",
-    "session": "tg-worker-developer"
+    "session": "tg-worker-developer",
+    "task_transport": "file"
   },
   {
     "agent_name": "QA Reviewer",
     "token_env": "WORKER_QA_BOT_TOKEN",
     "hermes_bin": "hermes",
     "role": "测试评审型 worker。负责验证、复现、运行测试、检查交付物、整理验收结论、风险和最终汇总。需要明确标注已验证项、未验证项和可复现步骤。",
-    "session": "tg-worker-qa-reviewer"
+    "session": "tg-worker-qa-reviewer",
+    "task_transport": "file"
   }
 ]

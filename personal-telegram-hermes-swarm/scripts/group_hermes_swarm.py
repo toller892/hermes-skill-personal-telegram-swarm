@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -21,6 +22,13 @@ from dataclasses import dataclass
 
 
 TELEGRAM_MESSAGE_LIMIT = 4096
+LONG_TASK_PREVIEW_LIMIT = 1200
+CLOUDFLARE_TASK_RE = re.compile(
+    r"\b(cloudflare|workers?|wrangler|d1|r2|kv|cache api)\b",
+    flags=re.IGNORECASE,
+)
+CF_TOKEN_RE = re.compile(r"\bcf[a-zA-Z0-9_-]{24,}\b")
+CF_ACCOUNT_ID_RE = re.compile(r"\b[a-f0-9]{32}\b", flags=re.IGNORECASE)
 
 
 class TelegramError(RuntimeError):
@@ -28,6 +36,10 @@ class TelegramError(RuntimeError):
 
 
 class PlannerOutputError(RuntimeError):
+    pass
+
+
+class HermesTimeoutError(RuntimeError):
     pass
 
 
@@ -49,6 +61,7 @@ class Agent:
     model: str | None = None
     provider: str | None = None
     toolsets: str | None = None
+    task_transport: str = "file"
 
 
 @dataclass(frozen=True)
@@ -62,6 +75,13 @@ class TaskItem:
 class Assignment:
     agent: Agent
     todos: list[TaskItem]
+
+
+@dataclass(frozen=True)
+class TaskContext:
+    text: str
+    file_path: str | None = None
+    is_large: bool = False
 
 
 def telegram_request(
@@ -184,15 +204,20 @@ def run_hermes(args: argparse.Namespace, prompt: str, agent: Agent | None = None
         command.extend(["--continue", agent.session])
     command.extend(["-z", prompt])
 
-    completed = subprocess.run(
-        command,
-        cwd=args.cwd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=args.hermes_timeout,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=args.cwd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=args.hermes_timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise HermesTimeoutError(
+            f"Hermes did not finish within {args.hermes_timeout} seconds"
+        ) from exc
     stdout = completed.stdout.strip()
     stderr = completed.stderr.strip()
     if completed.returncode != 0:
@@ -252,9 +277,45 @@ def full_task(task: str) -> TaskItem:
     return TaskItem(title="完整任务", description=task, is_full_task=True)
 
 
+def deterministic_tasks(task: str, worker_count: int, max_tasks: int) -> list[TaskItem]:
+    if worker_count <= 1:
+        return [
+            TaskItem(
+                title="执行完整任务",
+                description="读取原始任务，完成可执行交付物，并报告路径、命令、结果和阻塞项。",
+            )
+        ]
+
+    tasks = [
+        TaskItem(
+            title="实现与交付",
+            description=(
+                "读取原始任务，完成主要实现、部署、文件创建、脚本、页面或集成工作。"
+                "必须返回真实产物路径、URL、资源名、关键命令和已完成范围。"
+            ),
+        ),
+        TaskItem(
+            title="验证与总结",
+            description=(
+                "读取原始任务和实现结果，执行验收检查、测试、回读或浏览器验证。"
+                "输出通过项、失败项、未验证项、风险和最终可复现步骤。"
+            ),
+        ),
+    ]
+    if worker_count > 2 and max_tasks > 2:
+        tasks.insert(
+            1,
+            TaskItem(
+                title="体验与文档检查",
+                description="检查页面体验、使用说明、边界情况和交付说明是否满足原始任务。",
+            ),
+        )
+    return tasks[:max_tasks]
+
+
 def plan_tasks(args: argparse.Namespace, task: str, worker_count: int) -> tuple[list[TaskItem], str]:
     if worker_count <= 1:
-        return [full_task(task)], "single-worker-direct"
+        return deterministic_tasks(task, worker_count, 1), "single-worker-direct"
 
     target_tasks = max(worker_count, worker_count * args.todos_per_worker)
     max_tasks = max(worker_count, min(args.max_tasks, target_tasks))
@@ -282,8 +343,8 @@ def plan_tasks(args: argparse.Namespace, task: str, worker_count: int) -> tuple[
         raw = run_hermes(args, prompt)
         return parse_tasks(raw, max_tasks), "planned"
     except Exception as exc:
-        print(f"Planner fallback to full task: {exc}", file=sys.stderr, flush=True)
-        return [full_task(task)], "planner-fallback"
+        print(f"Planner fallback to deterministic split: {exc}", file=sys.stderr, flush=True)
+        return deterministic_tasks(task, worker_count, max_tasks), "planner-fallback"
 
 
 def format_todo_list(todos: list[TaskItem]) -> str:
@@ -293,9 +354,24 @@ def format_todo_list(todos: list[TaskItem]) -> str:
     return "\n".join(lines)
 
 
-def execute_assignment(
-    args: argparse.Namespace, original_task: str, assignment: Assignment
-) -> str:
+def task_preview(text: str) -> str:
+    if len(text) <= LONG_TASK_PREVIEW_LIMIT:
+        return text
+    return text[:LONG_TASK_PREVIEW_LIMIT].rstrip() + "\n\n...[原始任务较长，完整内容见任务文件]..."
+
+
+def format_task_context(task_context: TaskContext, agent: Agent) -> str:
+    if task_context.file_path and agent.task_transport != "inline":
+        return (
+            f"原始完整任务已保存到本机文件：{task_context.file_path}\n"
+            "请先读取该文件，再按你的 TODO 执行。"
+            "如果你无法访问这个路径，请明确说明无法读取原始任务文件，不要编造执行结果。\n\n"
+            f"任务摘录：\n{task_preview(task_context.text)}"
+        )
+    return f"总任务：\n{task_context.text}"
+
+
+def execute_assignment(args: argparse.Namespace, task_context: TaskContext, assignment: Assignment) -> str:
     todo_list = format_todo_list(assignment.todos)
     skill_line = ""
     if assignment.agent.skill:
@@ -308,7 +384,7 @@ def execute_assignment(
         "回复时按 TODO 编号逐项说明：完成 / 部分完成 / 阻塞，以及关键产出。"
         "如果任务要求创建或修改文件，完成后必须基于真实文件状态报告路径和功能，不要编造未验证的特性。"
         "如果无法完全完成，请明确说明缺口和下一步。\n\n"
-        f"总任务：\n{original_task}\n\n"
+        f"{format_task_context(task_context, assignment.agent)}\n\n"
         f"你的 TODO list：\n{todo_list}"
     )
     return run_hermes(args, prompt, assignment.agent)
@@ -342,6 +418,54 @@ def format_assignments(assignments: list[Assignment]) -> str:
     return "\n".join(lines)
 
 
+def save_large_task(args: argparse.Namespace, task_text: str) -> str | None:
+    if len(task_text) <= args.large_task_threshold:
+        return None
+    task_dir = args.task_dir or os.path.join(args.cwd, "tasks")
+    os.makedirs(task_dir, mode=0o700, exist_ok=True)
+    file_path = os.path.join(task_dir, f"task_{time.strftime('%Y%m%d_%H%M%S')}.md")
+    with open(file_path, "w", encoding="utf-8") as file:
+        file.write(task_text)
+        file.write("\n")
+    os.chmod(file_path, 0o600)
+    return file_path
+
+
+def cloudflare_preflight(task_text: str) -> list[str]:
+    if not CLOUDFLARE_TASK_RE.search(task_text):
+        return []
+
+    missing: list[str] = []
+    has_token = bool(os.environ.get("CLOUDFLARE_API_TOKEN") or CF_TOKEN_RE.search(task_text))
+    has_account = bool(
+        os.environ.get("CLOUDFLARE_ACCOUNT_ID") or CF_ACCOUNT_ID_RE.search(task_text)
+    )
+    has_wrangler = bool(shutil.which("wrangler") or shutil.which("npx"))
+
+    if not has_token:
+        missing.append("Cloudflare API token（可放在环境变量 CLOUDFLARE_API_TOKEN 或任务正文中）")
+    if not has_account:
+        missing.append("Cloudflare account id（可放在环境变量 CLOUDFLARE_ACCOUNT_ID 或任务正文中）")
+    if not has_wrangler:
+        missing.append("wrangler 或 npx（用于部署 Cloudflare Workers）")
+    return missing
+
+
+def friendly_worker_error(agent: Agent, exc: Exception, timeout: int) -> str:
+    if isinstance(exc, HermesTimeoutError):
+        return (
+            f"{agent.agent_name} (@{agent.bot.username}) 执行超时。\n"
+            f"当前 worker 超时时间是 {timeout} 秒。任务可能超过该 worker 能力、外部服务响应较慢，"
+            "或缺少必要工具/权限。\n"
+            "已停止本次 worker 子进程。建议检查凭据、网络、部署工具，并把大型任务拆成实现与验证阶段重试。"
+        )
+
+    detail = str(exc).strip()
+    if len(detail) > 1200:
+        detail = detail[:1200].rstrip() + "\n...[错误信息已截断]..."
+    return f"{agent.agent_name} (@{agent.bot.username}) 执行失败：{detail}"
+
+
 def handle_task(
     args: argparse.Namespace,
     orchestrator: Bot,
@@ -359,6 +483,34 @@ def handle_task(
         )
         return
 
+    missing = cloudflare_preflight(task_text)
+    if missing:
+        send_message(
+            orchestrator.token,
+            chat_id,
+            "收到 Cloudflare 相关任务，但执行前检查未通过，暂不分配给 worker 空跑。\n缺少：\n- "
+            + "\n- ".join(missing),
+            thread_id,
+        )
+        return
+
+    task_file = save_large_task(args, task_text)
+    task_context = TaskContext(
+        text=task_text,
+        file_path=task_file,
+        is_large=task_file is not None,
+    )
+
+    if task_context.is_large:
+        send_message(
+            orchestrator.token,
+            chat_id,
+            "收到，这是大型任务，已进入 project mode。\n"
+            f"原始任务已保存：{task_context.file_path}\n"
+            "接下来会按 worker 角色分工执行；如果 planner 无法稳定拆 JSON，会使用内置的实现/验证分工。",
+            thread_id,
+        )
+
     if len(workers) == 1:
         send_message(orchestrator.token, chat_id, "收到，当前只有 1 个 worker，直接分配完整任务...", thread_id)
     else:
@@ -369,7 +521,7 @@ def handle_task(
         send_message(
             orchestrator.token,
             chat_id,
-            "planner 没有返回合法 TODO JSON，已降级为完整任务分配，避免误拆完成报告。",
+            "planner 没有返回合法 TODO JSON，已使用内置实现/验证分工继续处理，避免把完整长任务塞给单个 worker。",
             thread_id,
         )
     assignments = build_assignments(tasks, workers)
@@ -385,7 +537,7 @@ def handle_task(
             thread_id,
         )
         try:
-            result = execute_assignment(args, task_text, assignment)
+            result = execute_assignment(args, task_context, assignment)
             send_message(
                 worker.bot.token,
                 chat_id,
@@ -396,7 +548,7 @@ def handle_task(
             send_message(
                 orchestrator.token,
                 chat_id,
-                f"{worker.agent_name} (@{worker.bot.username}) 执行失败：{exc}",
+                friendly_worker_error(worker, exc, args.hermes_timeout),
                 thread_id,
             )
 
@@ -463,6 +615,7 @@ def build_workers(args: argparse.Namespace) -> list[Agent]:
                 model=env_or_literal(spec, "model"),
                 provider=env_or_literal(spec, "provider"),
                 toolsets=env_or_literal(spec, "toolsets"),
+                task_transport=str(spec.get("task_transport") or "file"),
             )
         )
     return agents
@@ -479,6 +632,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--toolsets")
     parser.add_argument("--poll-timeout", type=int, default=30)
     parser.add_argument("--hermes-timeout", type=int, default=240)
+    parser.add_argument("--large-task-threshold", type=int, default=2000)
+    parser.add_argument("--task-dir")
     parser.add_argument("--max-tasks", type=int, default=5)
     parser.add_argument("--todos-per-worker", type=int, default=2)
     parser.add_argument("--workers-config")

@@ -52,8 +52,10 @@ Edit `workers.json`. Each worker can use:
 - the same `hermes` command with role instructions, or
 - a profile wrapper such as `hermes --profile frontend`.
 - an optional `"skill": "<skill-name>"` field if that worker has a separate role skill installed.
+- an optional `"task_transport": "inline"` field if that worker runs on a different machine and cannot read files from the master machine.
 
 For a simple MVP, leave `hermes_bin` as `hermes` and let the role prompt guide behavior.
+The default `"task_transport"` is `"file"`: long tasks are saved under `tasks/` and workers are told to read the task file. This is recommended when all workers run on the same cloud/server Hermes machine.
 
 If using profiles, create small wrapper scripts:
 
@@ -81,7 +83,8 @@ exec ./group_hermes_swarm.py \
   --hermes-bin "$(command -v hermes)" \
   --max-tasks 6 \
   --todos-per-worker 2 \
-  --hermes-timeout 420
+  --hermes-timeout 900 \
+  --large-task-threshold 2000
 ```
 
 Run it:
@@ -136,7 +139,9 @@ Fix: stop that worker gateway for group mode, or set it to require mentions. The
 
 Meaning: local `hermes` command failed or returned invalid JSON.
 
-Fix: verify:
+Behavior: the master uses an internal implementation/verification split instead of assigning the entire task to one worker.
+
+Fix the planner if this happens often:
 
 ```bash
 command -v hermes
@@ -144,6 +149,28 @@ hermes -z "只回复 ok"
 ```
 
 Use `--hermes-bin /absolute/path/to/hermes` if needed.
+
+### Large Task Project Mode
+
+When a task is longer than `--large-task-threshold`, the master saves it to `tasks/task_<timestamp>.md` and sends workers a path plus a short preview. Keep the default file mode when all workers run on the same machine.
+
+If a worker runs through SSH or another remote wrapper and cannot read the master's filesystem, set this worker in `workers.json`:
+
+```json
+"task_transport": "inline"
+```
+
+Inline transport sends the full task text to that worker. Use it only when file transport is impossible.
+
+### Cloudflare Preflight Fails
+
+For Cloudflare/D1/KV/R2/Workers tasks, the master checks for:
+
+- Cloudflare API token in `CLOUDFLARE_API_TOKEN` or in the task text
+- Cloudflare account id in `CLOUDFLARE_ACCOUNT_ID` or in the task text
+- `wrangler` or `npx`
+
+If any are missing, the master refuses to dispatch the task so workers do not burn the full timeout.
 
 ### Telegram API Timeout
 
