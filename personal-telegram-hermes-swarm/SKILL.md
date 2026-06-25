@@ -1,6 +1,6 @@
 ---
 name: personal-telegram-hermes-swarm
-description: Set up and operate a personal Hermes Telegram swarm with one master bot and multiple role worker bots in a private group or channel. Use when configuring a self-contained bot team, creating BotFather bots, wiring worker roles such as product/developer/frontend/QA/docs, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each operator can independently dispatch /task work from their own Hermes environment.
+description: Set up and operate a compact personal Hermes Telegram swarm with one master bot and two role worker bots in a private group or channel. Use when configuring a self-contained three-bot team, creating BotFather bots, wiring developer and QA reviewer workers, running group_hermes_swarm.py, troubleshooting Telegram getUpdates conflicts, or explaining how each operator can independently dispatch /task work from their own Hermes environment.
 ---
 
 # Personal Telegram Hermes Swarm
@@ -27,19 +27,16 @@ The operator owns all bot tokens and all Hermes execution. No external central c
 
 ## Default Team
 
-Use this default five-bot pattern unless the user asks for another shape:
+Use this default three-bot pattern unless the user asks for another shape:
 
 - Master bot: listens to `/task`, plans TODOs, assigns workers.
-- Product bot: requirements, scope, acceptance criteria.
-- Developer bot: backend, scripts, APIs, integration.
-- Frontend bot: UI, HTML/CSS/JS, browser-facing work.
-- QA bot: verification, tests, acceptance checks.
-- Docs bot: final summary, README, release notes.
+- Developer bot: requirements refinement, implementation, backend/frontend/scripts, integration, and reproducible commands.
+- QA Reviewer bot: verification, tests, acceptance checks, final summary, and unverified-risk notes.
 
 ## Setup Workflow
 
 1. Read `references/setup-guide.md` when doing full setup.
-2. Create one master bot and 3-5 worker bots with `@BotFather`.
+2. Create one master bot and two worker bots with `@BotFather`.
 3. Add all bots to one Telegram group or channel.
 4. Disable independent worker gateways in that group. Worker bots are speaking identities controlled by the master script.
 5. Configure `workers.json` with each worker bot token and role.

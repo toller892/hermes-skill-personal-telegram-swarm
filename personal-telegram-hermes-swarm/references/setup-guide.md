@@ -7,11 +7,8 @@ This guide creates one colleague-owned Telegram Hermes swarm.
 Use `@BotFather` to create:
 
 - `<name>_hermes_master_bot`
-- `<name>_product_bot`
 - `<name>_developer_bot`
-- `<name>_frontend_bot`
-- `<name>_qa_bot`
-- `<name>_docs_bot`
+- `<name>_qa_reviewer_bot`
 
 Put every token in a private `.env` file. Do not commit it.
 
@@ -42,11 +39,8 @@ Create `.env`:
 ```bash
 cat > .env <<'EOF'
 ORCHESTRATOR_BOT_TOKEN=<master_bot_token>
-WORKER_PRODUCT_BOT_TOKEN=<product_bot_token>
 WORKER_DEVELOPER_BOT_TOKEN=<developer_bot_token>
-WORKER_FRONTEND_BOT_TOKEN=<frontend_bot_token>
-WORKER_QA_BOT_TOKEN=<qa_bot_token>
-WORKER_DOCS_BOT_TOKEN=<docs_bot_token>
+WORKER_QA_BOT_TOKEN=<qa_reviewer_bot_token>
 EOF
 chmod 600 .env
 ```
