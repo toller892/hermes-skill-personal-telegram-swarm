@@ -639,17 +639,31 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workers-config")
     parser.add_argument("--no-drop-pending", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--allow-telegram-token-fallback",
+        action="store_true",
+        help=(
+            "Legacy mode only: use TELEGRAM_BOT_TOKEN when "
+            "ORCHESTRATOR_BOT_TOKEN is missing."
+        ),
+    )
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    orchestrator_token = os.environ.get("ORCHESTRATOR_BOT_TOKEN") or os.environ.get(
-        "TELEGRAM_BOT_TOKEN"
-    )
+    orchestrator_token = os.environ.get("ORCHESTRATOR_BOT_TOKEN")
+    if not orchestrator_token and args.allow_telegram_token_fallback:
+        orchestrator_token = os.environ.get("TELEGRAM_BOT_TOKEN")
 
     if not orchestrator_token:
-        print("Missing ORCHESTRATOR_BOT_TOKEN.", file=sys.stderr)
+        print(
+            "Missing ORCHESTRATOR_BOT_TOKEN. Refusing to fall back to "
+            "TELEGRAM_BOT_TOKEN by default so an existing Hermes Telegram bot "
+            "is not accidentally reused. Set ORCHESTRATOR_BOT_TOKEN to the new "
+            "swarm master bot token.",
+            file=sys.stderr,
+        )
         return 2
 
     try:

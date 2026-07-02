@@ -1,4 +1,4 @@
 interface:
   display_name: "Personal Telegram Hermes Swarm"
-  short_description: "Set up a personal Telegram bot team for Hermes task dispatch"
-  default_prompt: "Use this skill to create and operate a compact personal Hermes Telegram swarm with one master bot and two worker bots."
+  short_description: "Set up an isolated three-bot Telegram team for Hermes task dispatch"
+  default_prompt: "Use this skill to create and operate an isolated personal Hermes Telegram swarm with one new master bot and two send-only worker bots, without changing any existing Hermes Telegram bot."

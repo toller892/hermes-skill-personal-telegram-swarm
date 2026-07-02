@@ -1,12 +1,14 @@
 # Personal Telegram Hermes Swarm
 
-Open-source Hermes/Codex skill for setting up a colleague-owned Telegram bot team:
+Open-source Hermes/Codex skill for setting up an isolated colleague-owned Telegram bot team:
 
 - one master bot that listens to `/task`
 - two worker bots for developer and QA roles
 - one local `group_hermes_swarm.py` controller on the colleague's machine
 
 This pattern lets every operator run their own mini development team in their own Telegram group without sharing SSH access, relay access, or bot tokens with an external coordinator.
+
+It also works on machines that already have a Hermes Telegram bot configured. The existing bot, gateway, profiles, and config stay untouched; the swarm uses a new master/developer/QA bot set and a separate working directory.
 
 ## Install
 
@@ -46,7 +48,7 @@ personal-telegram-hermes-swarm/references/setup-guide.md
 
 ## Security
 
-Never commit Telegram bot tokens or API keys. Keep `.env` private. Each colleague owns their own bot tokens and their own Hermes execution environment.
+Never commit Telegram bot tokens or API keys. Keep `.env` private. Each colleague owns their own bot tokens and their own Hermes execution environment. Do not reuse an existing Hermes gateway bot as the swarm master; create a new master bot and set it with `ORCHESTRATOR_BOT_TOKEN`.
 
 ## License
 

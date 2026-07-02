@@ -2,6 +2,24 @@
 
 This guide creates one colleague-owned Telegram Hermes swarm.
 
+The guide is safe for both clean Hermes machines and machines that already have a Hermes Telegram bot. Existing bots and gateways are never modified.
+
+## Isolation Rules
+
+If this Hermes machine already has a Telegram bot, leave it alone:
+
+- Do not modify the old bot token, old `.env`, old config, old profile, old service, or old gateway.
+- Do not run `hermes gateway stop`, `hermes gateway start`, `hermes gateway restart`, or `hermes gateway setup`.
+- Do not reuse the old bot token as `ORCHESTRATOR_BOT_TOKEN`.
+- Do not put the old bot in the new swarm `.env`.
+- Do not edit `~/.hermes/.env`, `~/.hermes/config.yaml`, or `~/.hermes/profiles/*/.env`.
+
+The swarm is a separate controller process:
+
+- New master bot: `group_hermes_swarm.py` calls Telegram `getUpdates`.
+- New developer and QA bots: `group_hermes_swarm.py` uses their tokens only for Telegram `sendMessage`.
+- Existing Hermes bots or gateways can continue running separately.
+
 ## 1. Create Bots
 
 Use `@BotFather` to create:
@@ -12,6 +30,8 @@ Use `@BotFather` to create:
 
 Put every token in a private `.env` file. Do not commit it.
 
+Use new bots for the swarm. If the machine already has a Telegram-bound Hermes bot, do not reuse it as the master or as a worker.
+
 ## 2. Create Telegram Group
 
 Create a Telegram group or channel for this colleague's bot team. Add all bots.
@@ -20,17 +40,17 @@ Recommended:
 
 - Use `/task@master_bot ...` for testing.
 - Do not run separate Hermes gateways for worker bots in the group.
-- If a worker bot already has an independent Hermes gateway, stop it before using this group swarm.
-- Only the master bot should call Telegram `getUpdates`.
+- If another bot already has an independent Hermes gateway, leave it alone and do not include it in this swarm group.
+- Only the new swarm master bot should call Telegram `getUpdates`.
 - Worker bot tokens are used only by `group_hermes_swarm.py` to call `sendMessage`, so worker bots can appear as separate speakers in the group.
 
 ## 3. Prepare Local Files
 
-Create a local working directory:
+Create an isolated local working directory. Prefer a slugged path so it cannot collide with an existing setup:
 
 ```bash
-mkdir -p ~/hermes_swarm
-cd ~/hermes_swarm
+mkdir -p ~/hermes_swarm_<name>
+cd ~/hermes_swarm_<name>
 cp /path/to/personal-telegram-hermes-swarm/scripts/group_hermes_swarm.py .
 cp /path/to/personal-telegram-hermes-swarm/references/workers-template.json workers.json
 chmod +x group_hermes_swarm.py
@@ -46,6 +66,8 @@ WORKER_QA_BOT_TOKEN=<qa_bot_token>
 EOF
 chmod 600 .env
 ```
+
+Do not add `TELEGRAM_BOT_TOKEN` to this file. `ORCHESTRATOR_BOT_TOKEN` must be the new swarm master bot token.
 
 ## 4. Configure Workers
 
@@ -76,6 +98,13 @@ Create `run_swarm.sh`:
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")"
+unset TELEGRAM_BOT_TOKEN
+unset ORCHESTRATOR_BOT_TOKEN
+unset WORKER_BOT_TOKEN
+unset WORKER_BOT_TOKENS
+unset WORKER_BOT_SPECS
+unset WORKER_DEVELOPER_BOT_TOKEN
+unset WORKER_QA_BOT_TOKEN
 set -a
 . ./.env
 set +a
@@ -99,7 +128,7 @@ chmod +x run_swarm.sh
 For background mode:
 
 ```bash
-screen -dmS hermes_swarm ./run_swarm.sh
+screen -dmS hermes_swarm_<name> ./run_swarm.sh
 screen -ls
 ```
 
@@ -131,11 +160,19 @@ ps auxww | grep group_hermes_swarm.py
 kill <old_pid>
 ```
 
+Only stop the duplicate controller for the new swarm master token. Do not stop an unrelated old Hermes gateway.
+
 ### Worker Says Unknown Command
 
-Meaning: a worker's independent Telegram gateway is also listening in the group.
+Meaning: a bot with an independent Telegram gateway is also listening in the group, or a worker bot was reused from an existing setup.
 
-Fix: stop that worker gateway for group mode. The master/controller should be the only `/task` owner.
+Fix: remove that old gateway-bound bot from the swarm group and use new send-only worker bots. Do not stop or modify the old gateway unless the owner explicitly wants to retire it.
+
+### Missing ORCHESTRATOR_BOT_TOKEN
+
+Meaning: the new master token is not present in the isolated swarm `.env`.
+
+Fix: add `ORCHESTRATOR_BOT_TOKEN=<new_master_bot_token>` to the swarm `.env`. The controller intentionally does not fall back to `TELEGRAM_BOT_TOKEN`, because that variable is often used by an existing Hermes Telegram gateway.
 
 ### Planner Falls Back
 
